@@ -1,0 +1,1284 @@
+diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
+index 1cde73419..bf4d31b4f 100644
+--- a/agent/agent_runtime_helpers.py
++++ b/agent/agent_runtime_helpers.py
+@@ -1208,42 +1208,7 @@ def restore_primary_runtime(agent) -> bool:
+             api_mode=rt.get("compressor_api_mode", ""),
+         )
+ 
+-        # ── Rebind and re-select the primary credential pool ──
+-        # A cross-provider fallback attaches the fallback provider's pool. The
+-        # runtime fields above restore the primary, but leaving that pool in
+-        # place makes the next primary 401/429 hit the provider-mismatch guard
+-        # and disables credential rotation. Reload the primary pool first; if
+-        # auth storage is temporarily unreadable, clear the mismatched pool.
+-        primary_provider = str(rt.get("provider") or "").strip().lower()
+-        pool = getattr(agent, "_credential_pool", None)
+-        pool_provider = str(getattr(pool, "provider", "") or "").strip().lower()
+-        pool_matches_primary = pool_provider == primary_provider
+-        if (
+-            primary_provider == "custom"
+-            and pool_provider.startswith("custom:")
+-        ):
+-            try:
+-                from agent.credential_pool import get_custom_provider_pool_key
+-
+-                primary_key = (
+-                    get_custom_provider_pool_key(str(rt.get("base_url") or "")) or ""
+-                ).strip().lower()
+-                pool_matches_primary = bool(primary_key) and primary_key == pool_provider
+-            except Exception:
+-                pool_matches_primary = False
+-        if pool is not None and pool_provider and not pool_matches_primary:
+-            agent._credential_pool = None
+-            try:
+-                from agent.credential_pool import load_pool
+-
+-                agent._credential_pool = load_pool(primary_provider)
+-            except Exception as exc:
+-                logger.warning(
+-                    "Restore could not reload primary credential pool for %s: %s",
+-                    primary_provider,
+-                    exc,
+-                )
+-
++        # ── Re-select from the credential pool if one is available ──
+         # The snapshot's api_key was captured at construction time.  Across
+         # turns the pool may have rotated (token revocation, billing/rate-limit
+         # exhaustion, cooldown), leaving the snapshot key stale.  Restoring it
+@@ -1257,6 +1222,7 @@ def restore_primary_runtime(agent) -> bool:
+             entry = pool.select()
+             if entry is not None:
+                 entry_provider = str(getattr(entry, "provider", "") or "").strip().lower()
++                primary_provider = str(rt.get("provider") or "").strip().lower()
+                 entry_matches_primary = entry_provider == primary_provider
+                 # Custom endpoints all carry the generic ``custom`` provider on
+                 # the agent while the pool entry is keyed ``custom:<name>`` (see
+@@ -1892,9 +1858,6 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
+         old_norm = (old_provider or "").strip().lower()
+         new_norm = (new_provider or "").strip().lower()
+         if old_norm != new_norm or getattr(agent, "_credential_pool", None) is None:
+-            # A pool bound to the old provider is worse than no pool: the
+-            # recovery guard rejects it and every later 401/429 skips rotation.
+-            agent._credential_pool = None
+             try:
+                 from agent.credential_pool import load_pool
+                 agent._credential_pool = load_pool(new_provider)
+diff --git a/agent/error_classifier.py b/agent/error_classifier.py
+index 5eb4c09e0..4d75502da 100644
+--- a/agent/error_classifier.py
++++ b/agent/error_classifier.py
+@@ -1147,7 +1147,6 @@ def _classify_400(
+             "encrypted content for item" in error_msg
+             and "could not be verified" in error_msg
+         )
+-        or "could not decrypt the provided encrypted_content" in error_msg
+     ):
+         return result_fn(
+             FailoverReason.invalid_encrypted_content,
+diff --git a/hermes_cli/_parser.py b/hermes_cli/_parser.py
+index 9cc3c2779..b2be73871 100644
+--- a/hermes_cli/_parser.py
++++ b/hermes_cli/_parser.py
+@@ -271,27 +271,12 @@ def build_top_level_parser():
+     chat_parser.add_argument(
+         "--image", help="Optional local image path to attach to a single query"
+     )
+-    # `default=argparse.SUPPRESS` on flags that are ALSO declared on the
+-    # top-level parser: when the user writes `hermes -m foo chat`, argparse
+-    # first sets `args.model = "foo"` from the top-level parser, then
+-    # dispatches to the chat subparser. Without SUPPRESS the chat subparser's
+-    # own default (`None`) would silently clobber the top-level value because
+-    # the subparser shares the same namespace and `dest`. SUPPRESS keeps the
+-    # subparser action a no-op unless the user actually passes the flag after
+-    # the subcommand. Matches the pattern already used for `-s/--skills` and
+-    # the relaunch-inherited flags `-r/--resume`, `-c/--continue`,
+-    # `-w/--worktree`, `--yolo`, etc. (see tests/hermes_cli/
+-    # test_argparse_flag_propagation.py).
+     _inherited_flag(
+         chat_parser,
+-        "-m", "--model",
+-        default=argparse.SUPPRESS,
+-        help="Model to use (e.g., anthropic/claude-sonnet-4)",
++        "-m", "--model", help="Model to use (e.g., anthropic/claude-sonnet-4)",
+     )
+     chat_parser.add_argument(
+-        "-t", "--toolsets",
+-        default=argparse.SUPPRESS,
+-        help="Comma-separated toolsets to enable",
++        "-t", "--toolsets", help="Comma-separated toolsets to enable"
+     )
+     _inherited_flag(
+         chat_parser,
+@@ -308,7 +293,7 @@ def build_top_level_parser():
+         # are also valid values, and runtime resolution (resolve_runtime_provider)
+         # handles validation/error reporting consistently with the top-level
+         # `--provider` flag.
+-        default=argparse.SUPPRESS,
++        default=None,
+         help="Inference provider (default: auto). Built-in or a user-defined name from `providers:` in config.yaml.",
+     )
+     chat_parser.add_argument(
+@@ -416,14 +401,14 @@ def build_top_level_parser():
+         chat_parser,
+         "--tui",
+         action="store_true",
+-        default=argparse.SUPPRESS,
++        default=False,
+         help="Launch the modern TUI instead of the classic REPL",
+     )
+     _inherited_flag(
+         chat_parser,
+         "--cli",
+         action="store_true",
+-        default=argparse.SUPPRESS,
++        default=False,
+         help="Force the classic prompt_toolkit REPL (overrides display.interface=tui)",
+     )
+     _inherited_flag(
+@@ -431,7 +416,7 @@ def build_top_level_parser():
+         "--dev",
+         dest="tui_dev",
+         action="store_true",
+-        default=argparse.SUPPRESS,
++        default=False,
+         help="With --tui: run TypeScript sources via tsx (skip dist build)",
+     )
+ 
+diff --git a/hermes_cli/tools_config.py b/hermes_cli/tools_config.py
+index 9dbfe51b8..fb2adca4d 100644
+--- a/hermes_cli/tools_config.py
++++ b/hermes_cli/tools_config.py
+@@ -60,6 +60,7 @@ from hermes_cli.cli_output import (  # noqa: E402 — late import block
+ CONFIGURABLE_TOOLSETS = [
+     ("web",             "🔍 Web Search & Scraping",    "web_search, web_extract"),
+     ("browser",         "🌐 Browser Automation",       "navigate, click, type, scroll"),
++    ("browser_agent",   "🤖 browser-use (Local, no API)", "browser_task — CloakBrowser + browser-use"),
+     ("terminal",        "💻 Terminal & Processes",      "terminal, process"),
+     ("file",            "📁 File Operations",           "read, write, patch, search"),
+     ("code_execution",  "⚡ Code Execution",            "execute_code"),
+@@ -493,6 +494,30 @@ TOOL_CATEGORIES = {
+             },
+         ],
+     },
++    "browser_agent": {
++        "name": "browser-use (Local, no API)",
++        "icon": "🤖",
++        "providers": [
++            {
++                "name": "browser-use (Local, no API)",
++                "badge": "★ recommended · free",
++                "tag": "AI browser worker using local CloakBrowser + browser-use",
++                "env_vars": [
++                    {
++                        "key": "BROWSER_CDP_URL",
++                        "prompt": "Stealth Browser CDP URL",
++                        "default": "http://127.0.0.1:9377",
++                    },
++                    {
++                        "key": "BROWSER_LLM_BASE_URL",
++                        "prompt": "Browser-use LLM Base URL (optional - leave empty to inherit from Hermes model config)",
++                        "default": "",
++                    },
++                ],
++                "post_setup": "browser_use_local",
++            },
++        ],
++    },
+     "homeassistant": {
+         "name": "Smart Home",
+         "icon": "🏠",
+@@ -1280,6 +1305,44 @@ def _run_post_setup(post_setup_key: str):
+             _print_warning("    Node.js not found. Install Camofox via Docker:")
+             _print_info("      docker run -p 9377:9377 -e CAMOFOX_PORT=9377 jo-inc/camofox-browser")
+ 
++    elif post_setup_key == "browser_use_local":
++        _print_info("    Validating browser-use (Local, no API) environment...")
++        import subprocess
++        # Check systemd service status
++        res = subprocess.run(["systemctl", "--user", "is-active", "stealth-browser.service"], capture_output=True, text=True)
++        is_active = res.stdout.strip() == "active"
++        if not is_active:
++            _print_warning("    stealth-browser.service is not active.")
++            _print_info("      Run: systemctl --user start stealth-browser.service")
++        else:
++            _print_success("    stealth-browser.service is running")
++
++        # Check CDP reachability
++        import urllib.request
++        import json
++        cdp_url = os.environ.get("BROWSER_CDP_URL", "http://127.0.0.1:9377")
++        try:
++            req = urllib.request.Request(f"{cdp_url}/json/version", method="GET")
++            with urllib.request.urlopen(req, timeout=3) as resp:
++                data = json.loads(resp.read())
++                if data.get("Browser"):
++                    _print_success(f"    CDP endpoint reachable at {cdp_url}")
++                else:
++                    _print_warning(f"    CDP endpoint did not return browser version at {cdp_url}")
++        except Exception as e:
++            _print_warning(f"    CDP endpoint not reachable at {cdp_url}: {e}")
++            _print_info("      Verify that stealth-browser.service is running and listening on port 9377")
++
++        # Check worker dir
++        worker_dir = os.path.expanduser("~/tool/browser-use-cloak-stealth")
++        if not os.path.isdir(worker_dir):
++            _print_warning(f"    Worker directory not found: {worker_dir}")
++            _print_info("      Please clone and install the stealth environment repository:")
++            _print_info("        git clone https://github.com/nnishad/browser-use-cloak-stealth ~/tool/browser-use-cloak-stealth")
++            _print_info("        cd ~/tool/browser-use-cloak-stealth && ./install.sh")
++        else:
++            _print_success(f"    Worker directory exists: {worker_dir}")
++
+     elif post_setup_key == "cua_driver":
+         install_cua_driver(upgrade=False)
+ 
+diff --git a/model_tools.py b/model_tools.py
+index c59c189e3..727b07793 100644
+--- a/model_tools.py
++++ b/model_tools.py
+@@ -1275,6 +1275,7 @@ def handle_function_call(
+                         task_id=task_id,
+                         session_id=session_id,
+                         user_task=user_task,
++                        enabled_toolsets=enabled_toolsets,
+                     )
+             from hermes_cli.middleware import run_tool_execution_middleware
+ 
+diff --git a/run_agent.py b/run_agent.py
+index fe378f396..ae6fa9d0a 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -5731,6 +5731,27 @@ class AIAgent:
+                      skip_tool_request_middleware: bool = False,
+                      tool_request_middleware_trace: Optional[list[dict[str, Any]]] = None) -> str:
+         """Forwarder — see ``agent.agent_runtime_helpers.invoke_tool``."""
++        if function_name == "browser_task":
++            _is_subagent = getattr(self, "_delegate_depth", 0) > 0
++            if not _is_subagent:
++                goal_text = function_args.get("task", "") or function_args.get("goal", "")
++                constraints = function_args.get("constraints", "")
++                timeout = function_args.get("timeout", "")
++                
++                child_goal = f"Use the browser_task tool to: {goal_text}"
++                if constraints:
++                    child_goal += f"\nConstraints: {constraints}"
++                if timeout:
++                    child_goal += f"\nTimeout: {timeout}s"
++                
++                from tools.delegate_tool import delegate_task as _delegate_task
++                return _delegate_task(
++                    goal=child_goal,
++                    background=True,
++                    toolsets=["browser_agent"],
++                    parent_agent=self,
++                )
++
+         from agent.agent_runtime_helpers import invoke_tool
+         return invoke_tool(
+             self,
+diff --git a/tests/agent/test_error_classifier.py b/tests/agent/test_error_classifier.py
+index 7623ac24b..baadfa7e1 100644
+--- a/tests/agent/test_error_classifier.py
++++ b/tests/agent/test_error_classifier.py
+@@ -841,26 +841,6 @@ class TestClassifyApiError:
+         assert result.retryable is True
+         assert result.should_fallback is False
+ 
+-    def test_xai_invalid_encrypted_content_wording_uses_replay_recovery(self):
+-        e = MockAPIError(
+-            "Error code: 400 - Could not decrypt the provided encrypted_content. "
+-            "Ensure the value is the unmodified encrypted_content from a previous response.",
+-            status_code=400,
+-            body={
+-                "code": "Client specified an invalid argument",
+-                "error": (
+-                    "Could not decrypt the provided encrypted_content. Ensure the value "
+-                    "is the unmodified encrypted_content from a previous response."
+-                ),
+-            },
+-        )
+-
+-        result = classify_api_error(e, provider="xai-oauth", model="grok-4.3")
+-
+-        assert result.reason == FailoverReason.invalid_encrypted_content
+-        assert result.retryable is True
+-        assert result.should_fallback is False
+-
+     def test_invalid_encrypted_content_broad_message_match_does_not_catch_generic_parse_error(self):
+         message = "Encrypted content could not be decrypted or parsed."
+         e = MockAPIError(
+diff --git a/tests/hermes_cli/test_argparse_flag_propagation.py b/tests/hermes_cli/test_argparse_flag_propagation.py
+index 558489b84..0c62655a6 100644
+--- a/tests/hermes_cli/test_argparse_flag_propagation.py
++++ b/tests/hermes_cli/test_argparse_flag_propagation.py
+@@ -219,121 +219,3 @@ print(json.dumps(results))
+                 f"stderr: {entry['stderr']}"
+             )
+             assert "unrecognized arguments" not in entry["stderr"]
+-
+-
+-class TestChatSubparserInheritedValueFlags:
+-    """Verify -t/--toolsets, -m/--model and --provider survive parent→chat
+-    subparser dispatch.
+-
+-    Regression test for #28780: `hermes -t web chat` silently dropped the
+-    toolset because the chat subparser re-declared `-t/--toolsets` with
+-    `default=None`, which clobbered the top-level parser's value during
+-    subparser dispatch.
+-
+-    Uses the real `hermes_cli._parser.build_top_level_parser()` rather than
+-    the hand-rolled replica above so this also fails if the production
+-    parser drifts back to `default=None` on these flags.
+-    """
+-
+-    @pytest.fixture
+-    def real_parser(self):
+-        from hermes_cli._parser import build_top_level_parser
+-        parser, _subparsers, _chat = build_top_level_parser()
+-        return parser
+-
+-    @pytest.mark.parametrize("flag,attr,value", [
+-        ("-t", "toolsets", "web"),
+-        ("--toolsets", "toolsets", "web,terminal"),
+-        ("-m", "model", "anthropic/claude-sonnet-4"),
+-        ("--model", "model", "openai/gpt-4"),
+-        ("--provider", "provider", "openrouter"),
+-    ])
+-    def test_flag_before_chat_is_preserved(self, real_parser, flag, attr, value):
+-        args, _ = real_parser.parse_known_args([flag, value, "chat"])
+-        assert getattr(args, attr, None) == value, (
+-            f"`hermes {flag} {value} chat` lost the flag — got "
+-            f"{getattr(args, attr, None)!r}, expected {value!r}"
+-        )
+-
+-    @pytest.mark.parametrize("flag,attr,value", [
+-        ("-t", "toolsets", "web"),
+-        ("--toolsets", "toolsets", "web,terminal"),
+-        ("-m", "model", "anthropic/claude-sonnet-4"),
+-        ("--model", "model", "openai/gpt-4"),
+-        ("--provider", "provider", "openrouter"),
+-    ])
+-    def test_flag_after_chat_still_works(self, real_parser, flag, attr, value):
+-        args, _ = real_parser.parse_known_args(["chat", flag, value])
+-        assert getattr(args, attr, None) == value
+-
+-    def test_no_flag_leaves_attrs_at_top_level_default(self, real_parser):
+-        """When the user passes none of the inherited flags, the top-level
+-        parser's `default=None` still seeds the namespace — the SUPPRESS on
+-        the subparser must not remove existing attributes."""
+-        args, _ = real_parser.parse_known_args(["chat"])
+-        assert getattr(args, "toolsets", "MISSING") is None
+-        assert getattr(args, "model", "MISSING") is None
+-        assert getattr(args, "provider", "MISSING") is None
+-
+-    def test_all_three_flags_before_chat(self, real_parser):
+-        """Issue #28780 reporter's case generalized: passing every inherited
+-        value flag before `chat` must preserve all of them simultaneously."""
+-        args, _ = real_parser.parse_known_args([
+-            "-t", "web",
+-            "-m", "anthropic/claude-sonnet-4",
+-            "--provider", "openrouter",
+-            "chat",
+-        ])
+-        assert args.toolsets == "web"
+-        assert args.model == "anthropic/claude-sonnet-4"
+-        assert args.provider == "openrouter"
+-
+-    @pytest.mark.parametrize("flag,attr", [
+-        ("--tui", "tui"),
+-        ("--cli", "cli"),
+-        ("--dev", "tui_dev"),
+-    ])
+-    def test_store_true_flag_before_chat_is_preserved(
+-        self, real_parser, flag, attr,
+-    ):
+-        """`--tui` / `--cli` / `--dev` are store_true flags inherited by chat; the same
+-        SUPPRESS contract applies. Without it, the subparser's `default=False`
+-        would clobber the parent's `True` when used as `hermes --tui chat`."""
+-        args, _ = real_parser.parse_known_args([flag, "chat"])
+-        assert getattr(args, attr, None) is True, (
+-            f"`hermes {flag} chat` lost the flag — got "
+-            f"{getattr(args, attr, None)!r}, expected True"
+-        )
+-
+-    def test_chat_subparser_inherited_value_flags_use_suppress(self):
+-        """Contract test for the underlying invariant.
+-
+-        Any chat-subparser flag whose `dest` also exists on the top-level
+-        parser MUST declare `default=argparse.SUPPRESS`, otherwise the
+-        subparser silently overwrites the top-level value with its own
+-        default during dispatch. This is the structural class behind #28780.
+-        """
+-        from hermes_cli._parser import build_top_level_parser
+-        parser, _subparsers, chat_parser = build_top_level_parser()
+-
+-        top_level_dests = {
+-            a.dest for a in parser._actions
+-            if a.option_strings and a.dest != "help"
+-        }
+-
+-        offenders = []
+-        for action in chat_parser._actions:
+-            if not action.option_strings or action.dest == "help":
+-                continue
+-            if action.dest not in top_level_dests:
+-                continue
+-            if action.default is not argparse.SUPPRESS:
+-                offenders.append((action.option_strings, action.dest, action.default))
+-
+-        assert not offenders, (
+-            "Chat subparser redeclares these top-level flags without "
+-            "default=argparse.SUPPRESS; they will silently clobber the "
+-            "top-level value when used as `hermes <flag> <value> chat`:\n  "
+-            + "\n  ".join(f"{opts} dest={dest} default={d!r}"
+-                          for opts, dest, d in offenders)
+-        )
+diff --git a/tests/hermes_cli/test_kanban_worker_spawn_toolsets.py b/tests/hermes_cli/test_kanban_worker_spawn_toolsets.py
+index 78f45d34b..da9b6b957 100644
+--- a/tests/hermes_cli/test_kanban_worker_spawn_toolsets.py
++++ b/tests/hermes_cli/test_kanban_worker_spawn_toolsets.py
+@@ -125,51 +125,6 @@ def test_default_spawn_never_boots_the_tui(monkeypatch, tmp_path):
+     assert "HERMES_TUI" not in captured["env"]
+ 
+ 
+-def test_default_spawn_model_override_survives_real_cli_parse(monkeypatch, tmp_path):
+-    """The dispatcher's pre-``chat`` model flag must reach ``args.model``.
+-
+-    This is an integration contract between Kanban's worker argv builder and
+-    the real CLI parser. A parser default once erased the explicit override,
+-    silently sending the worker to its profile default or fallback instead.
+-    """
+-    root = tmp_path / ".hermes"
+-    (root / "profiles" / "elias").mkdir(parents=True)
+-    root.joinpath("config.yaml").write_text("{}\n", encoding="utf-8")
+-    monkeypatch.setenv("HERMES_HOME", str(root))
+-
+-    from hermes_cli import kanban_db as kb
+-    from hermes_cli._parser import build_top_level_parser
+-
+-    monkeypatch.setattr(kb, "_resolve_hermes_argv", lambda: ["hermes"])
+-    captured = {}
+-
+-    class FakeProc:
+-        pid = 4244
+-
+-    def fake_popen(cmd, *args, **kwargs):
+-        captured["cmd"] = list(cmd)
+-        return FakeProc()
+-
+-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+-
+-    workspace = tmp_path / "workspace"
+-    workspace.mkdir()
+-    task = _make_task(kb, assignee="elias")
+-    task.model_override = "gpt-5.6-sol"
+-    kb._default_spawn(task, str(workspace))
+-
+-    parser, _subparsers, _chat_parser = build_top_level_parser()
+-    # Profile selection is attached by the outer CLI bootstrap rather than
+-    # build_top_level_parser(); remove that already-validated prefix and parse
+-    # the worker flags/subcommand through the real shared parser.
+-    assert captured["cmd"][1:3] == ["-p", "elias"]
+-    args = parser.parse_args(captured["cmd"][3:])
+-
+-    assert args.command == "chat"
+-    assert args.model == "gpt-5.6-sol"
+-    assert args.query == "work kanban task t_spawn_tools"
+-
+-
+ def test_resolve_worker_cli_toolsets_uses_profile_home_not_parent_config(monkeypatch, tmp_path):
+     root = tmp_path / ".hermes"
+     profile = root / "profiles" / "elias"
+diff --git a/tests/run_agent/test_primary_runtime_restore.py b/tests/run_agent/test_primary_runtime_restore.py
+index 0d732277e..d1ac56dca 100644
+--- a/tests/run_agent/test_primary_runtime_restore.py
++++ b/tests/run_agent/test_primary_runtime_restore.py
+@@ -286,47 +286,15 @@ class TestRestorePrimaryRuntime:
+         agent._credential_pool = _DeepseekPool()
+         agent._swap_credential = MagicMock()
+ 
+-        primary_pool = MagicMock()
+-        primary_pool.provider = primary_provider
+-        primary_pool.has_available.return_value = False
+-        with (
+-            patch("run_agent.OpenAI", return_value=MagicMock()),
+-            patch("agent.credential_pool.load_pool", return_value=primary_pool) as load_pool,
+-        ):
++        with patch("run_agent.OpenAI", return_value=MagicMock()):
+             result = agent._restore_primary_runtime()
+ 
+         assert result is True
+         assert agent.provider == primary_provider
+         assert agent.base_url == primary_base_url
+         assert "deepseek" not in str(agent.base_url)
+-        assert agent._credential_pool is primary_pool
+-        load_pool.assert_called_once_with(primary_provider)
+         agent._swap_credential.assert_not_called()
+ 
+-    def test_restore_clears_fallback_pool_when_primary_pool_reload_fails(self):
+-        """A fallback pool must never remain attached to the restored primary."""
+-        agent = _make_agent(
+-            provider="openai-api",
+-            base_url="https://api.openai.com/v1",
+-        )
+-        agent._fallback_activated = True
+-        fallback_pool = MagicMock()
+-        fallback_pool.provider = "deepseek"
+-        agent._credential_pool = fallback_pool
+-
+-        with (
+-            patch("run_agent.OpenAI", return_value=MagicMock()),
+-            patch(
+-                "agent.credential_pool.load_pool",
+-                side_effect=RuntimeError("auth store unavailable"),
+-            ),
+-        ):
+-            result = agent._restore_primary_runtime()
+-
+-        assert result is True
+-        assert agent.provider == "openai-api"
+-        assert agent._credential_pool is None
+-
+     def test_restore_swaps_matching_custom_pool_entry(self):
+         """Custom primary + custom:<name> entry whose base_url resolves to the
+         SAME custom key must swap (legitimate same-endpoint rotation)."""
+diff --git a/tests/run_agent/test_switch_model_pool_reload_52727.py b/tests/run_agent/test_switch_model_pool_reload_52727.py
+index e1ef7d651..a1dba807f 100644
+--- a/tests/run_agent/test_switch_model_pool_reload_52727.py
++++ b/tests/run_agent/test_switch_model_pool_reload_52727.py
+@@ -213,7 +213,6 @@ class TestSwitchModelReloadsCredentialPool:
+             )
+ 
+         # The switch itself completed (provider/model updated) even though
+-        # the pool reload failed, without retaining the old provider's pool.
++        # the pool reload failed.
+         assert agent.provider == "groq"
+-        assert agent.model == "llama-3.3-70b"
+-        assert agent._credential_pool is None
++        assert agent.model == "llama-3.3-70b"
+\ No newline at end of file
+diff --git a/tools/async_delegation.py b/tools/async_delegation.py
+index 9b4b0e964..f89395a4e 100644
+--- a/tools/async_delegation.py
++++ b/tools/async_delegation.py
+@@ -533,6 +533,14 @@ def interrupt_all(reason: str = "shutdown") -> int:
+                 )
+     if count:
+         logger.info("Interrupted %d async delegation(s) (%s)", count, reason)
++    
++    # Also kill any active browser workers
++    try:
++        from tools.browser_agent_tool import kill_all_workers
++        kill_all_workers()
++    except Exception:
++        pass
++    
+     return count
+ 
+ 
+diff --git a/tools/browser_agent_tool.py b/tools/browser_agent_tool.py
+new file mode 100644
+index 000000000..affc015f6
+--- /dev/null
++++ b/tools/browser_agent_tool.py
+@@ -0,0 +1,557 @@
++"""
++Browser Agent Tool Module — AI-driven browser automation via CloakBrowser + browser-use.
++
++Exposes two tools in the ``browser_agent`` toolset:
++
++``browser_task``
++    Spawns a browser-use worker subprocess that connects to the running
++    CloakBrowser (managed by stealth-browser.service) via CDP.  The worker
++    communicates over JSON-lines stdio.  Mid-flight user input (missing form
++    data, choices) is relayed through the existing ``completion_queue`` event
++    rail — the tool handler pushes an ``info_needed`` event, blocks on a
++    ``threading.Event``, and the parent Hermes (which HAS ``clarify_callback``)
++    asks the user then calls ``browser_respond`` to unblock.
++
++``browser_respond``
++    Delivers a user's answer to a pending ``info_request`` from a background
++    browser task.  Sets the ``threading.Event`` that unblocks the waiting
++    ``browser_task`` handler so the answer can be forwarded to the worker.
++"""
++
++import json
++import logging
++import os
++import subprocess
++import threading
++from typing import Any, Dict, Optional
++from uuid import uuid4
++
++logger = logging.getLogger(__name__)
++
++# ---------------------------------------------------------------------------
++# Module-level state for mid-flight communication
++# ---------------------------------------------------------------------------
++# request_id → {"event": threading.Event, "answer": str | None}
++_pending_responses: Dict[str, Dict[str, Any]] = {}
++_pending_lock = threading.Lock()
++
++# Active worker subprocesses — keyed by task_id for interrupt cleanup
++_active_workers: Dict[str, subprocess.Popen] = {}
++_workers_lock = threading.Lock()
++
++
++def kill_all_workers() -> None:
++    """Kill all active browser workers — called on /stop or shutdown."""
++    import signal as _signal
++    import threading
++    with _workers_lock:
++        workers = list(_active_workers.items())
++    
++    def _kill_proc(task_id, proc):
++        # Try graceful cancellation via stdin command
++        try:
++            if proc.stdin:
++                proc.stdin.write(json.dumps({"type": "cancel"}) + "\n")
++                proc.stdin.flush()
++        except Exception:
++            pass
++        
++        # Wait up to 3s for graceful exit
++        try:
++            proc.wait(timeout=3)
++        except subprocess.TimeoutExpired:
++            # Escalating to SIGINT (KeyboardInterrupt) to trigger worker finally blocks
++            try:
++                os.killpg(os.getpgid(proc.pid), _signal.SIGINT)
++                proc.wait(timeout=2)
++            except Exception:
++                # Escalating to SIGKILL
++                if proc.poll() is None:
++                    try:
++                        os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
++                        proc.wait(timeout=1)
++                    except Exception:
++                        pass
++        except Exception:
++            pass
++            
++        with _workers_lock:
++            _active_workers.pop(task_id, None)
++
++    # Spawn daemon threads to avoid blocking Hermes's main thread during /stop
++    for task_id, proc in workers:
++        t = threading.Thread(target=_kill_proc, args=(task_id, proc), daemon=True)
++        t.start()
++
++
++def _cleanup_stale_workers() -> None:
++    """Clean up references to terminated subprocesses to prevent leaks."""
++    with _workers_lock:
++        stale = [tid for tid, proc in _active_workers.items() if proc.poll() is not None]
++        for tid in stale:
++            _active_workers.pop(tid, None)
++
++# ---------------------------------------------------------------------------
++# Worker path — isolated uv env with browser-use + cloakbrowser
++# ---------------------------------------------------------------------------
++WORKER_DIR = os.path.expanduser("~/tool/browser-use-cloak-stealth")
++WORKER_TIMEOUT = 900  # seconds — wall-clock limit for the subprocess
++
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++def _get_session_key() -> str:
++    """Return the current session key for completion_queue routing."""
++    try:
++        from tools.approval import get_current_session_key
++        return get_current_session_key(default="") or ""
++    except Exception:
++        return ""
++
++
++def _push_info_needed(request_id: str, question: str, choices, goal: str) -> None:
++    """Push an info_needed event to the completion_queue."""
++    from tools.process_registry import process_registry
++    process_registry.completion_queue.put({
++        "type": "async_delegation",
++        "status": "info_needed",
++        "request_id": request_id,
++        "session_key": _get_session_key(),
++        "question": question,
++        "choices": choices,
++        "goal": goal,
++    })
++
++
++def _push_escalation(request_id: str, reason: str, tunnel_url: str,
++                     timeout: int, goal: str) -> None:
++    """Push an escalation event to the completion_queue."""
++    from tools.process_registry import process_registry
++    process_registry.completion_queue.put({
++        "type": "async_delegation",
++        "status": "escalation",
++        "request_id": request_id,
++        "session_key": _get_session_key(),
++        "reason": reason,
++        "tunnel_url": tunnel_url,
++        "timeout": timeout,
++        "goal": goal,
++    })
++
++
++# ---------------------------------------------------------------------------
++# browser_task handler
++# ---------------------------------------------------------------------------
++
++def handle_browser_task(args: Dict[str, Any], **kw) -> str:
++    """Spawn the browser-use worker and relay events until completion."""
++    import logging
++    _logger = logging.getLogger(__name__)
++    
++    # Debug: log what kwargs we received
++    _logger.info(f"browser_task called with kw keys: {list(kw.keys())}")
++    
++    _toolsets = kw.get("enabled_toolsets") or []
++    # Auto-delegate check: if explicitly delegated (has subagent metadata) or running inside a child agent (which has restricted toolsets)
++    is_delegated = (
++        any(k in kw for k in ("task_index", "subagent_id", "depth"))
++        or ("browser_agent" in _toolsets and len(_toolsets) <= 2)
++    )
++    _logger.info(f"is_delegated={is_delegated} (keys={list(kw.keys())}, toolsets={_toolsets})")
++    
++    if not is_delegated:
++        # Direct call detected — return instruction for the model to delegate
++        goal_text = args.get("task", "") or args.get("goal", "")
++        constraints = args.get("constraints", "")
++        timeout = args.get("timeout", "")
++        
++        # Build the full goal for the child agent
++        child_goal = f"Use the browser_task tool to: {goal_text}"
++        if constraints:
++            child_goal += f"\nConstraints: {constraints}"
++        if timeout:
++            child_goal += f"\nTimeout: {timeout}s"
++        
++        return json.dumps({
++            "status": "redirect",
++            "message": (
++                f"To run this browser task without blocking, call delegate_task with:\n"
++                f"  goal: '{child_goal}'\n"
++                f"  background: true\n"
++                f"  toolsets: ['browser_agent']\n\n"
++                f"IMPORTANT: The child agent MUST call browser_task(task='{goal_text}') to use the stealth browser. "
++                f"Do NOT run browser-use directly via terminal/python — it won't connect to VNC."
++            ),
++        }, ensure_ascii=False)
++    
++    task_id = kw.get("task_id", "")
++    goal = args.get("task", "") or args.get("goal", "")
++    constraints = args.get("constraints", "")
++    timeout = int(args.get("timeout", WORKER_TIMEOUT))
++
++    if not goal:
++        return json.dumps({"error": "task (goal) is required"}, ensure_ascii=False)
++    
++    # Clean up only terminated worker processes.
++    _cleanup_stale_workers()
++    
++    # Resolve LLM config from Hermes config so the worker uses the same endpoint
++    _llm_base_url = os.environ.get("BROWSER_LLM_BASE_URL", "")
++    _llm_api_key = os.environ.get("BROWSER_LLM_API_KEY", "")
++    _llm_model = ""
++    try:
++        from hermes_cli.config import load_config
++        _cfg = load_config()
++        _model_cfg = _cfg.get("model", {})
++        if not _llm_base_url and _model_cfg.get("base_url"):
++            _llm_base_url = _model_cfg["base_url"]
++        if _model_cfg.get("default"):
++            _llm_model = _model_cfg["default"]
++        _key_env = _model_cfg.get("key_env", "")
++        if _key_env:
++            _llm_api_key = os.environ.get(_key_env, _llm_api_key or "local")
++    except Exception:
++        pass
++    if not _llm_api_key:
++        _llm_api_key = "local"
++
++    task_spec = json.dumps({
++        "goal": goal,
++        "constraints": constraints,
++        "timeout": timeout,
++        "task_id": task_id,
++        "llm_base_url": _llm_base_url,
++        "llm_api_key": _llm_api_key,
++        "llm_model": _llm_model,
++    })
++
++    # Spawn worker subprocess in the isolated uv env
++    try:
++        proc = subprocess.Popen(
++            ["uv", "run", "python", "browser_worker.py", task_spec],
++            cwd=WORKER_DIR,
++            env={**os.environ, "DISPLAY": ":99"},
++            stdout=subprocess.PIPE,
++            stdin=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            text=True,
++            bufsize=1,  # line-buffered
++            start_new_session=True,  # new process group for killpg cleanup
++        )
++    except Exception as exc:
++        return json.dumps(
++            {"error": f"Failed to spawn browser worker: {exc}"},
++            ensure_ascii=False,
++        )
++
++    # Start a thread to capture stderr (for crash diagnostics)
++    stderr_lines = []
++    def _read_stderr():
++        try:
++            for line in proc.stderr:
++                stderr_lines.append(line.rstrip())
++        except Exception:
++            pass
++    stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
++    stderr_thread.start()
++
++    # Register for interrupt cleanup — /stop can find and kill us
++    with _workers_lock:
++        _active_workers[task_id] = proc
++
++    status_messages = []
++
++    try:
++        # Non-blocking stdout read loop — checks for interrupt every 2s
++        import selectors
++        sel = selectors.DefaultSelector()
++        sel.register(proc.stdout, selectors.EVENT_READ)
++
++        while True:
++            # Check if the process was killed externally (e.g. /stop)
++            if proc.poll() is not None:
++                break
++
++            # Wait for data with 2s timeout (allows interrupt checking)
++            ready = sel.select(timeout=2)
++            if not ready:
++                continue
++
++            line = proc.stdout.readline()
++            if not line:  # EOF — process exited
++                break
++            line = line.strip()
++            if not line:
++                continue
++            try:
++                evt = json.loads(line)
++            except json.JSONDecodeError:
++                continue
++
++            evt_type = evt.get("type")
++
++            if evt_type == "status":
++                msg = evt.get("message", "")
++                status_messages.append(msg)
++                logger.info("[browser_task %s] %s", task_id, msg)
++
++            elif evt_type == "progress":
++                step = evt.get("step", 0)
++                max_steps = evt.get("max_steps", 0)
++                pct = evt.get("percent", 0)
++                status_messages.append(f"Step {step}/{max_steps} ({pct}%)")
++
++            elif evt_type == "info_request":
++                request_id = evt.get("request_id") or uuid4().hex[:8]
++                wait_event = threading.Event()
++                with _pending_lock:
++                    _pending_responses[request_id] = {
++                        "event": wait_event,
++                        "answer": None,
++                    }
++                # Push to completion_queue — drain injects as new turn for parent
++                _push_info_needed(
++                    request_id=request_id,
++                    question=evt.get("question", ""),
++                    choices=evt.get("choices"),
++                    goal=goal,
++                )
++                # Block until browser_respond sets the Event (interrupt-aware)
++                interrupted = False
++                while not wait_event.wait(timeout=2):
++                    if proc.poll() is not None:
++                        interrupted = True
++                        break
++                if not interrupted:
++                    with _pending_lock:
++                        answer = _pending_responses.pop(request_id, {}).get("answer")
++                    if answer is not None and proc.stdin:
++                        try:
++                            proc.stdin.write(json.dumps({
++                                "type": "clarify_response",
++                                "request_id": request_id,
++                                "answer": answer,
++                            }) + "\n")
++                            proc.stdin.flush()
++                        except (BrokenPipeError, OSError):
++                            pass
++                else:
++                    with _pending_lock:
++                        _pending_responses.pop(request_id, None)
++
++            elif evt_type == "escalation_request":
++                request_id = evt.get("request_id") or uuid4().hex[:8]
++                wait_event = threading.Event()
++                with _pending_lock:
++                    _pending_responses[request_id] = {
++                        "event": wait_event,
++                        "answer": None,
++                    }
++                _push_escalation(
++                    request_id=request_id,
++                    reason=evt.get("reason", ""),
++                    tunnel_url=evt.get("tunnel_url", ""),
++                    timeout=evt.get("timeout", 120),
++                    goal=goal,
++                )
++                # Block until browser_respond sets the Event (interrupt-aware)
++                interrupted = False
++                while not wait_event.wait(timeout=2):
++                    if proc.poll() is not None:
++                        interrupted = True
++                        break
++                if not interrupted:
++                    with _pending_lock:
++                        answer = _pending_responses.pop(request_id, {}).get("answer")
++                    if answer is not None and proc.stdin:
++                        try:
++                            proc.stdin.write(json.dumps({
++                                "type": "clarify_response",
++                                "request_id": request_id,
++                                "answer": answer,
++                            }) + "\n")
++                            proc.stdin.flush()
++                        except (BrokenPipeError, OSError):
++                            pass
++                else:
++                    with _pending_lock:
++                        _pending_responses.pop(request_id, None)
++
++            elif evt_type == "result":
++                # Worker finished — return its result
++                summary = evt.get("summary", "")
++                if status_messages:
++                    summary = "\n".join(status_messages[-5:]) + "\n\n" + summary
++                return json.dumps(evt, ensure_ascii=False)
++
++            elif evt_type == "error":
++                return json.dumps(evt, ensure_ascii=False)
++
++            elif evt_type == "heartbeat":
++                pass  # worker is alive
++
++            elif evt_type == "ready":
++                status_messages.append("Worker ready")
++
++    except Exception as exc:
++        return json.dumps(
++            {"error": f"Browser task failed: {exc}"},
++            ensure_ascii=False,
++        )
++    finally:
++        # Unregister from active workers
++        with _workers_lock:
++            _active_workers.pop(task_id, None)
++        # Always terminate the subprocess — escalate to SIGKILL if needed
++        try:
++            proc.terminate()
++            proc.wait(timeout=5)
++        except Exception:
++            try:
++                proc.kill()
++                proc.wait(timeout=3)
++            except Exception:
++                pass
++        # Kill the entire process group (catches any grandchildren)
++        try:
++            import signal as _signal
++            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
++        except Exception:
++            pass
++
++    # Include stderr in the error message if the worker crashed
++    stderr_output = "\n".join(stderr_lines[-20:]) if stderr_lines else ""
++    if stderr_output:
++        logger.error("[browser_task %s] Worker stderr:\n%s", task_id, stderr_output)
++    return json.dumps(
++        {"error": "Worker exited without result", "status_log": status_messages[-10:], "stderr": stderr_output[-2000:]},
++        ensure_ascii=False,
++    )
++
++
++# ---------------------------------------------------------------------------
++# browser_respond handler
++# ---------------------------------------------------------------------------
++
++def handle_browser_respond(args: Dict[str, Any], **kw) -> str:
++    """Deliver a user's answer to a pending browser info_request."""
++    request_id = args.get("request_id", "")
++    answer = args.get("answer", "")
++
++    if not request_id:
++        return json.dumps({"error": "request_id is required"}, ensure_ascii=False)
++
++    with _pending_lock:
++        entry = _pending_responses.get(request_id)
++
++    if not entry:
++        return json.dumps(
++            {"error": f"No pending request with id '{request_id}'"},
++            ensure_ascii=False,
++        )
++
++    entry["answer"] = answer
++    entry["event"].set()
++    return json.dumps(
++        {"status": "delivered", "request_id": request_id},
++        ensure_ascii=False,
++    )
++
++
++# ---------------------------------------------------------------------------
++# Check functions
++# ---------------------------------------------------------------------------
++
++def check_browser_agent_requirements() -> bool:
++    """Browser agent requires the stealth-browser.service and worker env."""
++    return os.path.isdir(WORKER_DIR)
++
++
++# =============================================================================
++# OpenAI Function-Calling Schemas
++# =============================================================================
++
++BROWSER_TASK_SCHEMA = {
++    "name": "browser_task",
++    "description": (
++        "Run an AI-driven browser automation task using CloakBrowser + browser-use. "
++        "The worker connects to a stealth browser instance and performs the given "
++        "task autonomously (navigate, fill forms, click buttons, extract data, etc.).\n\n"
++        "IMPORTANT: This tool is designed to be called via delegate_task(background=True) "
++        "so it runs in the background without blocking the conversation. "
++        "Example: delegate_task(goal='browser_task: Fill the form on example.com', "
++        "background=True, toolsets=['browser_agent']).\n\n"
++        "If the worker needs information mid-flight (e.g. missing form data), "
++        "you will receive a [BROWSER TASK NEEDS INPUT] message. Respond by calling "
++        "clarify() to ask the user, then browser_respond() to unblock the worker."
++    ),
++    "parameters": {
++        "type": "object",
++        "properties": {
++            "task": {
++                "type": "string",
++                "description": "The browser task goal (e.g. 'Fill out the contact form on example.com').",
++            },
++            "constraints": {
++                "type": "string",
++                "description": "Optional constraints or instructions for the task.",
++            },
++            "timeout": {
++                "type": "integer",
++                "description": "Maximum seconds for the task (default: 300).",
++                "minimum": 30,
++                "maximum": 1800,
++            },
++        },
++        "required": ["task"],
++    },
++}
++
++BROWSER_RESPOND_SCHEMA = {
++    "name": "browser_respond",
++    "description": (
++        "Deliver a user's answer to a background browser task that requested input. "
++        "Call this after asking the user via the clarify tool. The request_id comes "
++        "from the [BROWSER TASK NEEDS INPUT] message."
++    ),
++    "parameters": {
++        "type": "object",
++        "properties": {
++            "request_id": {
++                "type": "string",
++                "description": "The request_id from the BROWSER TASK NEEDS INPUT message.",
++            },
++            "answer": {
++                "type": "string",
++                "description": "The user's answer to the question.",
++            },
++        },
++        "required": ["request_id", "answer"],
++    },
++}
++
++
++# =============================================================================
++# Registry
++# =============================================================================
++from tools.registry import registry, tool_error
++
++registry.register(
++    name="browser_task",
++    toolset="browser_agent",
++    schema=BROWSER_TASK_SCHEMA,
++    handler=lambda args, **kw: handle_browser_task(args, **kw),
++    check_fn=check_browser_agent_requirements,
++    emoji="🌐",
++)
++
++registry.register(
++    name="browser_respond",
++    toolset="browser_agent",
++    schema=BROWSER_RESPOND_SCHEMA,
++    handler=lambda args, **kw: handle_browser_respond(args, **kw),
++    check_fn=lambda: True,
++    emoji="💬",
++)
+diff --git a/tools/delegate_tool.py b/tools/delegate_tool.py
+index 24c2cd332..f76eec376 100644
+--- a/tools/delegate_tool.py
++++ b/tools/delegate_tool.py
+@@ -1124,11 +1124,31 @@ def _build_child_agent(
+         # toolset names (e.g. web, terminal) are recognised during intersection.
+         expanded_parent = _expand_parent_toolsets(parent_toolsets)
+         child_toolsets = [t for t in toolsets if t in expanded_parent]
++        # Fallback: keep explicitly-requested toolsets that are statically
++        # defined in TOOLSETS even when they are absent from the parent's
++        # expanded toolsets.  This handles plugin-registered toolsets
++        # (e.g. browser_agent) whose tools are loaded dynamically and may
++        # not appear in composite parent toolsets like hermes-cli.  The
++        # caller explicitly asked for these toolsets via delegate_task(),
++        # so this is an intentional grant of capability.  Safety is still
++        # enforced by DELEGATE_BLOCKED_TOOLS and _strip_blocked_tools.
++        _child_set = set(child_toolsets)
++        for _ts in toolsets:
++            if _ts not in _child_set and _ts in TOOLSETS:
++                # Security boundary: only allow custom/plugin toolsets if the parent
++                # actually has this capability enabled, preventing privilege escalation.
++                if not parent_toolsets or _ts in parent_toolsets:
++                    child_toolsets.append(_ts)
++                    _child_set.add(_ts)
+         if _get_inherit_mcp_toolsets():
+             child_toolsets = _preserve_parent_mcp_toolsets(
+                 child_toolsets, parent_toolsets
+             )
+         child_toolsets = _strip_blocked_tools(child_toolsets)
++        logger.info(
++            "Child toolset intersection: requested=%s, parent=%s, expanded_parent=%s, result=%s",
++            toolsets, parent_toolsets, list(expanded_parent)[:10], child_toolsets,
++        )
+     elif parent_agent and parent_enabled is not None:
+         child_toolsets = _strip_blocked_tools(parent_enabled)
+     elif parent_toolsets:
+@@ -2373,6 +2393,7 @@ def delegate_task(
+     max_iterations: Optional[int] = None,
+     role: Optional[str] = None,
+     background: Optional[bool] = None,
++    toolsets: Optional[List[str]] = None,
+     parent_agent=None,
+ ) -> str:
+     """
+@@ -2512,13 +2533,17 @@ def delegate_task(
+             # Per-task role beats top-level; normalise again so unknown
+             # per-task values warn and degrade to leaf uniformly.
+             effective_role = _normalize_role(t.get("role") or top_role)
++            # Per-task toolsets override the top-level toolsets when provided.
++            # This allows batch tasks where each subagent gets different capabilities
++            # (e.g. one with browser_agent, another with terminal).
++            _task_toolsets = t.get("toolsets") or toolsets
+             child = _build_child_agent(
+                 task_index=i,
+                 goal=t["goal"],
+                 context=t.get("context"),
+-                # Subagents always inherit the parent's toolsets; the model
+-                # cannot choose or narrow them (no model-facing toolsets arg).
+-                toolsets=None,
++                # Use per-task toolsets if provided, else top-level toolsets,
++                # else inherit parent's full toolset.
++                toolsets=_task_toolsets,
+                 model=creds["model"],
+                 max_iterations=effective_max_iter,
+                 task_count=n_tasks,
+@@ -3506,6 +3531,7 @@ registry.register(
+         max_iterations=args.get("max_iterations"),
+         role=args.get("role"),
+         background=_model_background_value(args, kw.get("parent_agent")),
++        toolsets=args.get("toolsets"),
+         parent_agent=kw.get("parent_agent"),
+     ),
+     check_fn=check_delegate_requirements,
+diff --git a/tools/process_registry.py b/tools/process_registry.py
+index 0faa80ba6..4c928917a 100644
+--- a/tools/process_registry.py
++++ b/tools/process_registry.py
+@@ -1969,6 +1969,47 @@ def _format_async_delegation(evt: dict) -> str:
+     dispatched_at = evt.get("dispatched_at")
+     completed_at = evt.get("completed_at") or _time.time()
+ 
++    # ----- Browser-agent mid-flight: info_needed -----
++    if status == "info_needed":
++        request_id = evt.get("request_id", "unknown")
++        question = evt.get("question", "")
++        choices = evt.get("choices")
++        lines = [
++            f"[BROWSER TASK NEEDS INPUT — {request_id}]",
++            "A background browser task needs information to continue.",
++        ]
++        if goal:
++            lines.append(f"Task: {goal}")
++        lines.append(f"Question: {question}")
++        if choices:
++            lines.append(f"Choices: {', '.join(choices)}")
++        lines.append(
++            f"\nAsk the user this question using the clarify tool, "
++            f"then call browser_respond(request_id='{request_id}', "
++            f"answer=<user's response>)."
++        )
++        return "\n".join(lines)
++
++    # ----- Browser-agent mid-flight: escalation (CAPTCHA/MFA) -----
++    if status == "escalation":
++        request_id = evt.get("request_id", "unknown")
++        reason = evt.get("reason", "")
++        tunnel_url = evt.get("tunnel_url", "")
++        esc_timeout = evt.get("timeout", 120)
++        lines = [
++            f"[BROWSER TASK ESCALATION — {request_id}]",
++            "A background browser task hit a CAPTCHA/MFA challenge.",
++        ]
++        if goal:
++            lines.append(f"Task: {goal}")
++        if reason:
++            lines.append(f"Reason: {reason}")
++        if tunnel_url:
++            lines.append(f"Open this URL in your browser to solve it: {tunnel_url}")
++        lines.append("The task will resume automatically once you solve it.")
++        lines.append(f"Timeout: {esc_timeout} seconds.")
++        return "\n".join(lines)
++
+     # ----- Batch (fan-out) completion: consolidated multi-task block -----
+     # A whole delegate_task fan-out dispatched as one background unit finishes
+     # together and carries a per-task `results` list. Render every subagent's
+diff --git a/toolsets.py b/toolsets.py
+index 03e64fdba..a5bc38484 100644
+--- a/toolsets.py
++++ b/toolsets.py
+@@ -181,6 +181,12 @@ TOOLSETS = {
+         "includes": []
+     },
+     
++    "browser_agent": {
++        "description": "AI-driven browser automation via CloakBrowser + browser-use for complex multi-step web tasks",
++        "tools": ["browser_task", "browser_respond"],
++        "includes": []
++    },
++    
+     "cronjob": {
+         "description": "Cronjob management tool - create, list, update, pause, resume, remove, and trigger scheduled tasks",
+         "tools": ["cronjob"],

@@ -1,0 +1,11 @@
+[Unit]
+Description=CloakBrowser Stealth CDP Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/tool/browser-use-cloak-stealth/start.sh
+Restart=always
+
+[Install]
+WantedBy=default.target
